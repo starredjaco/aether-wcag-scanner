@@ -20,18 +20,22 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { withScanner } from '../services/scanner-manager.ts';
 import { splitFixTargets } from './fix-priority.ts';
+import type { FixGroup } from './fix-priority.ts';
 import { getFix } from '../services/fix-service.ts';
 import { logToolEntry, logError } from '../services/log.ts';
 import type { RateLimitInfo, TierInfo } from '../services/fix-service.ts';
 import type { GroundedElement, RejectedTechnique, GroundingPath, Confidence, FixTier, Rationale } from '../../types/a11y';
 import { verifySnippet } from '../services/verify-service.ts';
 import type { VerificationResult } from '../services/verify-service.ts';
+import { actionabilityFields, computeFixKind, verificationCounts, verificationSummary } from '../services/actionability.ts';
+import type { Actionability, FixKind } from '../services/actionability.ts';
 import { calculateViolationStats } from '../../concepts/a11y-scanner/stats.ts';
 import type { Violation } from '../../types/a11y';
 import { SPAScanner } from '../../concepts/a11y-scanner/spa-scanner.ts';
 import type { SPAScanConfig, SPAFramework, SPARouteConfig } from '../../types/spa-config';
 import { toolError, jsonResult } from './tool-response.ts';
 import { isScannableUrl } from '../../concepts/a11y-scanner/url-guard.ts';
+import { applyRepeatHistory, type RepeatInfo } from '../services/fix-history.ts';
 
 const URL_GUARD_MESSAGE = 'Only http(s) URLs to non-metadata hosts can be scanned';
 
@@ -123,7 +127,7 @@ const ScanAndFixInput = {
     .max(50)
     .optional()
     .default(10)
-    .describe('Maximum number of violations to generate fixes for (default 10). Set 0 for a scan-only pass (no RAG calls).'),
+    .describe('Maximum number of fixes (default 10). Nodes are grouped by root cause (rule + component markup) and each group gets one fix; every rule gets a fix before any rule gets a second. Set 0 for a scan-only pass (no RAG calls).'),
   minSeverity: z
     .enum(['critical', 'serious', 'moderate', 'minor'])
     .optional()
@@ -152,7 +156,22 @@ interface FixEntry {
   html: string;
   target?: string | string[];
   route?: string;
+  /** Distinct elements this one fix covers (#19); 1 = a single element. */
+  occurrences: number;
+  /** When occurrences > 1: one line saying the fix is for the shared component. */
+  appliesTo?: string;
+  /** When occurrences > 1: every covered element (first MAX_INSTANCES listed). */
+  instances?: Array<{ target?: string | string[]; route?: string }>;
+  moreInstances?: number;
+  /** What to do with this fix, in one fixed line (#28). Lead with actionabilityNote verbatim. */
+  actionability: Actionability;
+  actionabilityNote: string;
+  /** change = concrete edit; reference_pattern = generic KB example; guidance_only = nothing to paste. */
+  fixKind: FixKind;
+  /** The edit to make. Empty unless fixKind is 'change' (#28). */
   fixHtml: string;
+  /** A generic KB example (fixKind reference_pattern): adapt it, do not paste. */
+  referencePattern?: string;
   explanation: string;
   wcagCriteria: Array<{ sc: string; title: string; level: string }>;
   techniques: Array<{ id: string; description: string; codeSnippet?: string }>;
@@ -169,6 +188,8 @@ interface FixEntry {
   confidence?: Confidence;
   fixTier?: FixTier;
   rationale?: Rationale;
+  /** Set when an earlier scan already gave this rule/target a fix (#31). */
+  repeat?: RepeatInfo;
 }
 
 /** Flatten prioritized violations into per-node entries (severity-sorted). */
@@ -213,17 +234,54 @@ function toRemainingRow(e: NodeEntry) {
   };
 }
 
-/** Generate (and optionally verify) fixes for the chosen node entries. */
+/** Cap on the targets listed per grouped fix; the rest are counted. */
+const MAX_INSTANCES = 20;
+
+/**
+ * Rules whose fix is an accessible name or text alternative: the structure is
+ * shared across instances but the wording is not, so the grouped fix is a
+ * pattern, not copy-paste text.
+ */
+const PER_INSTANCE_TEXT_RULES = new Set([
+  'image-alt', 'input-image-alt', 'area-alt', 'object-alt', 'svg-img-alt', 'role-img-alt',
+  'link-name', 'button-name', 'label', 'select-name', 'frame-title', 'document-title',
+  'aria-command-name', 'aria-input-field-name', 'aria-toggle-field-name', 'aria-meter-name',
+  'aria-progressbar-name', 'aria-tooltip-name', 'aria-dialog-name', 'empty-heading',
+]);
+
+/** Occurrence count + covered targets for one grouped fix (#19). */
+function groupFields(g: FixGroup<NodeEntry>) {
+  if (g.occurrences <= 1) return { occurrences: 1 };
+  // g.instances already has viewport duplicates of one element collapsed.
+  const all = g.instances.map((m) => {
+    const target = m.violation.nodes?.[m.nodeIndex]?.target;
+    return { ...(target !== undefined ? { target } : {}), ...(m.route ? { route: m.route } : {}) };
+  });
+  return {
+    occurrences: g.occurrences,
+    appliesTo: PER_INSTANCE_TEXT_RULES.has(g.representative.violation.id)
+      ? `Applies to ${g.occurrences} instances of this component. Apply the same change to each, but write ` +
+        'each name or text alternative for its own instance; do not copy this one.'
+      : `Applies to ${g.occurrences} instances of this component. Apply the change once to the shared ` +
+        'component or template to fix all of them.',
+    instances: all.slice(0, MAX_INSTANCES),
+    ...(all.length > MAX_INSTANCES ? { moreInstances: all.length - MAX_INSTANCES } : {}),
+  };
+}
+
+/** Generate (and optionally verify) one fix per chosen root-cause group. */
 async function generateFixes(
-  toFix: NodeEntry[],
+  toFix: FixGroup<NodeEntry>[],
   verifyFixes: boolean,
   scanId: string,
   fallbackUrl?: string,
 ): Promise<FixEntry[]> {
   const fixEntries: FixEntry[] = [];
 
-  for (const { violation, nodeIndex, route, routeUrl } of toFix) {
+  for (const group of toFix) {
+    const { violation, nodeIndex, route, routeUrl } = group.representative;
     const node = violation.nodes![nodeIndex];
+    const grouped = groupFields(group);
     // Fix and verify the element's real markup, not axe's shortened node.html (#21).
     const html = node.fullHtml ?? node.html;
     try {
@@ -242,10 +300,19 @@ async function generateFixes(
         scanId,
       });
 
+      // No-op / KB fixes are not changes (#28); there is nothing to verify.
+      const fixKind = computeFixKind({
+        html,
+        fixHtml: fix.fixHtml,
+        source: fix.source,
+        fixTier: fix.fixTier,
+        confidenceTier: fix.confidence?.tier,
+      });
+
       // Deterministically verify the fix on the real browser engine (diff
       // original vs fixed HTML). Never invent a quality verdict.
       let verification: VerificationResult | undefined;
-      if (verifyFixes) {
+      if (verifyFixes && fixKind === 'change') {
         try {
           verification = await verifySnippet({
             ruleId: violation.id,
@@ -266,7 +333,8 @@ async function generateFixes(
         html,
         target: node.target,
         ...(route ? { route } : {}),
-        fixHtml: fix.fixHtml,
+        ...grouped,
+        ...actionabilityFields(fixKind, fix.fixHtml, fix.confidence?.tier, verification),
         explanation: fix.explanation,
         wcagCriteria: fix.wcagCriteria,
         techniques: fix.techniques,
@@ -293,7 +361,8 @@ async function generateFixes(
         html,
         target: node.target,
         ...(route ? { route } : {}),
-        fixHtml: html,
+        ...grouped,
+        ...actionabilityFields('guidance_only', html, undefined, undefined),
         explanation: 'Fix generation failed. Review manually.',
         wcagCriteria: [],
         techniques: [],
@@ -322,13 +391,21 @@ function ragSummary(fixEntries: FixEntry[]): {
   return { ragStatus, ...(degradation?.message ? { notice: degradation.message } : {}) };
 }
 
+/** verificationCounts + one plain summary line (#29), replacing verified/unverified counts. */
+function verificationFields(fixEntries: FixEntry[]) {
+  return {
+    verificationCounts: verificationCounts(fixEntries),
+    verificationSummary: verificationSummary(fixEntries),
+  };
+}
+
 const DISCLAIMER =
   'fixHtml values are suggested remediations, not applied changes. This tool did not modify any file. Apply each suggestion to your own source and re-verify before considering a violation fixed.';
 
 export function registerScanAndFix(server: McpServer): void {
   server.tool(
     'aether_scan_and_fix',
-    'START HERE for any accessibility / a11y / WCAG question about a URL. Scans the page in a real browser (Playwright + axe-core, desktop/tablet/mobile) for WCAG 2.1 AA violations AND generates grounded fixes in one call; do not fetch and read the page HTML yourself instead. Pass `url` for a page or the `spa` block for a multi-route single-page app. Returns violations grouped by severity, each with fixHtml (a SUGGESTION — nothing is modified), explanation, WCAG techniques, confidence tier, and a measured `verification` block (verified / targetCleared / regressions / newViolations / complianceDelta). Defaults generate fixes for the top 10 violations; set maxFixes:0 only if the user explicitly wants a scan without fixes.',
+    'START HERE for any accessibility / a11y / WCAG question about a URL. Scans the page in a real browser (Playwright + axe-core, desktop/tablet/mobile) for WCAG 2.1 AA violations AND generates grounded fixes in one call; do not fetch and read the page HTML yourself instead. Pass `url` for a page or the `spa` block for a multi-route single-page app. Returns violations grouped by severity; each fix leads with `actionabilityNote` (apply / apply_then_confirm / review / no_fix; relay it verbatim, and never present review or no_fix as a fix), then fixHtml (a SUGGESTION, nothing is modified; empty unless fixKind is change), explanation, WCAG techniques, confidence tier, and a measured `verification` block (status / targetCleared / regressions / newViolations / contextDependent / complianceDelta). Top level carries verificationCounts and a verificationSummary line. Fixes are grouped by root cause: one fix per repeated component, with `occurrences`, `appliesTo` and `instances` listing every element it covers; every rule gets a fix before any rule gets a second. Defaults generate up to 10 fixes; set maxFixes:0 only if the user explicitly wants a scan without fixes.',
     ScanAndFixInput,
     async ({ url, spa, viewport, maxFixes, minSeverity, verifyFixes }) => {
       const scanId = `scan_${randomUUID()}`;
@@ -409,10 +486,12 @@ async function runSinglePage(
   }
 
   const nodeEntries = toNodeEntries(result.violations, minLevel);
-  // Round-robin across rules within each severity tier so ten near-identical
-  // ARIA nodes cannot crowd out a strong single-node fix like image-alt.
+  // One fix per root-cause group, one slot per rule first (#19): ten instances
+  // of one component cannot crowd out the serious link-name fix.
   const { toFix, remaining } = splitFixTargets(nodeEntries, maxFixes);
   const fixEntries = await generateFixes(toFix, verifyFixes, scanId, url);
+  const remainingRows = remaining.map(toRemainingRow);
+  const repeatedFixes = applyRepeatHistory(scanId, fixEntries, remainingRows, () => result.url); // #31
   const { ragStatus, notice: ragNotice } = ragSummary(fixEntries);
   const partialNotice = result.partial && result.viewportErrors?.length
     ? `Partial scan: the ${result.viewportErrors.map((e) => e.viewport).join(' and ')} viewport failed ` +
@@ -420,8 +499,7 @@ async function runSinglePage(
     : undefined;
   const notice = [partialNotice, ragNotice].filter(Boolean).join(' ') || undefined;
 
-  const verifiedCount = fixEntries.filter((e) => e.verification?.verified).length;
-  const unverifiedFixCount = fixEntries.filter((e) => !e.verification?.verified).length;
+  const verification = verificationFields(fixEntries);
 
   const output = {
     mode: 'single-page' as const,
@@ -437,13 +515,16 @@ async function runSinglePage(
       statistics: vr.statistics,
     })),
     fixesGenerated: fixEntries.length,
+    ...(maxFixes > 0 ? { instancesCovered: fixEntries.reduce((n, e) => n + e.occurrences, 0) } : {}),
     fixesAreSuggestions: true,
     disclaimer: DISCLAIMER,
     ragStatus,
     ...(notice ? { notice } : {}),
-    ...(maxFixes > 0 ? { verifiedCount, unverifiedFixCount } : {}),
+    ...(maxFixes > 0 ? verification : {}),
+    ...(maxFixes > 0 ? { repeatedFixes } : {}),
+    ...(result.coverage ? { coverage: result.coverage } : {}),
     violationsWithFixes: fixEntries,
-    remainingViolations: remaining.map(toRemainingRow),
+    remainingViolations: remainingRows,
   };
 
   return jsonResult(output, notice);
@@ -497,6 +578,9 @@ async function runSpa(
 
     const { toFix, remaining } = splitFixTargets(nodeEntries, maxFixes);
     const fixEntries = await generateFixes(toFix, verifyFixes, scanId);
+    const remainingRows = remaining.map(toRemainingRow);
+    const routeUrls = new Map(report.routeResults.map((r) => [r.routeName || r.route, r.url]));
+    const repeatedFixes = applyRepeatHistory(scanId, fixEntries, remainingRows, (route) => (route && routeUrls.get(route)) || spa.entryUrl); // #31
     const { ragStatus, notice: ragNotice } = ragSummary(fixEntries);
     const routeErrors = report.routeErrors ?? [];
     const partialNotice = routeErrors.length
@@ -505,8 +589,7 @@ async function runSpa(
       : undefined;
     const notice = [partialNotice, ragNotice].filter(Boolean).join(' ') || undefined;
 
-    const verifiedCount = fixEntries.filter((e) => e.verification?.verified).length;
-    const unverifiedFixCount = fixEntries.filter((e) => !e.verification?.verified).length;
+    const verification = verificationFields(fixEntries);
 
     const output = {
       mode: 'spa' as const,
@@ -527,6 +610,7 @@ async function runSpa(
         discoveryMethod: r.discoveryMethod,
         success: r.success,
         error: r.error,
+        ...(r.coverage ? { coverage: r.coverage } : {}),
         violationCount: r.violations.length,
         violations: r.violations.map((v) => ({
           ruleId: v.id,
@@ -536,13 +620,15 @@ async function runSpa(
         })),
       })),
       fixesGenerated: fixEntries.length,
+      ...(maxFixes > 0 ? { instancesCovered: fixEntries.reduce((n, e) => n + e.occurrences, 0) } : {}),
       fixesAreSuggestions: true,
       disclaimer: DISCLAIMER,
       ragStatus,
       ...(notice ? { notice } : {}),
-      ...(maxFixes > 0 ? { verifiedCount, unverifiedFixCount } : {}),
+      ...(maxFixes > 0 ? verification : {}),
+      ...(maxFixes > 0 ? { repeatedFixes } : {}),
       violationsWithFixes: fixEntries,
-      remainingViolations: remaining.map(toRemainingRow),
+      remainingViolations: remainingRows,
     };
 
     return jsonResult(output, notice);

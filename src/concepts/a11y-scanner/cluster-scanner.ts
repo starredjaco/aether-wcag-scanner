@@ -5,12 +5,13 @@ import { runAxeOnPage as runAxe } from './axe.ts';
 import { captureRootSemantics, type ElementSemantics } from './element-semantics.ts';
 import { loadUIAutomationSteps } from '../ui-automation/step-loader.ts';
 import { runUIAutomationSequenceWithScans } from '../ui-automation/step-runner.ts';
-import type { PageScanResult, Violation, ViolationNode, ViewportResult } from '../../types/a11y';
+import type { CoverageReport, PageScanResult, Violation, ViolationNode, ViewportResult } from '../../types/a11y';
 import type { UIAutomationSequenceResult } from '../../types/ui-automation';
 import { calculateViolationStats } from './stats.ts';
 import { captureViolationScreenshots, type ScreenshotScanOptions } from './screenshot.ts';
 import { captureNodeLayouts } from './node-layout.ts';
 import { captureNodeContext } from './node-context.ts';
+import { probeCoverage } from './coverage-probe.ts';
 import { getChromiumLaunchArgs } from './browser-args.ts';
 import { assertScannableUrl } from './url-guard.ts';
 import { BotGateError, UnscannableError, detectBotGateOnPage, unscannableStatus } from './bot-gate.ts';
@@ -96,9 +97,13 @@ export class ClusterScanner {
    * Initialize the browser
    */
   async initialize(): Promise<void> {
-    await ensureChromiumInstalled();
+    // Headless only, no `channel`: with just chromium-headless-shell installed
+    // (#25) anything else would fail. `executablePath` is set only when an older
+    // full-browser-only install is what is on disk.
+    const browserOverrides = await ensureChromiumInstalled();
     this.browser = await chromium.launch({
       headless: true,
+      ...browserOverrides,
       // Sandbox stays on unless root / AETHER_NO_SANDBOX=1 (browser-args.ts).
       args: getChromiumLaunchArgs(),
     });
@@ -255,7 +260,7 @@ export class ClusterScanner {
     viewport: { label: string; width: number; height: number },
     scanOpts?: ScanOptions,
     captured?: Set<string>,
-  ): Promise<{ violations: Violation[]; axeError?: string; uiAutomationResults?: UIAutomationSequenceResult }> {
+  ): Promise<{ violations: Violation[]; axeError?: string; uiAutomationResults?: UIAutomationSequenceResult; coverage?: CoverageReport }> {
     const context = await this.createContext({ width: viewport.width, height: viewport.height });
     try {
       const page = await context.newPage();
@@ -309,6 +314,8 @@ export class ClusterScanner {
           // desktop-only, always on, bounded, never throws.
           await captureNodeContext(page, result.violations);
         }
+        // What the load-time scan did not exercise (#33) — desktop-only, never throws.
+        const coverage = viewport.label === 'desktop' ? await probeCoverage(page, 'load') : undefined;
 
         // Element screenshots (SME Issue 1) — captured at every viewport but
         // deduped via the shared `captured` set so each violation is shot once,
@@ -372,6 +379,7 @@ export class ClusterScanner {
           violations: finalViolations,
           axeError: result.axeError,
           uiAutomationResults,
+          ...(coverage && { coverage }),
         };
       } finally {
         await page.close();
@@ -403,10 +411,12 @@ export class ClusterScanner {
       const captured = new Set<string>();
       const viewportErrors: Array<{ viewport: string; error: string }> = [];
       let unscannable: UnscannableError | undefined;
+      let coverage: CoverageReport | undefined;
 
       for (const vp of VIEWPORTS) {
         try {
-          const { violations, axeError, uiAutomationResults: viewportUiResults } = await this.scanAtViewport(url, vp, scanOpts, captured);
+          const { violations, axeError, uiAutomationResults: viewportUiResults, coverage: vpCoverage } = await this.scanAtViewport(url, vp, scanOpts, captured);
+          coverage ??= vpCoverage;
           perViewport.push(violations);
           if (axeError) axeErrors.push(`[${vp.label}] ${axeError}`);
           if (!uiAutomationResults) {
@@ -464,6 +474,7 @@ export class ClusterScanner {
         ...(viewportErrors.length > 0 && { partial: true, viewportErrors }),
         ...(combinedError && { error: combinedError }),
         ...(uiAutomationResults && { uiAutomationResults }),
+        ...(coverage && { coverage }),
       };
     } catch (err) {
       return {

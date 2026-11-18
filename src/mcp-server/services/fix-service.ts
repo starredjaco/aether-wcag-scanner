@@ -303,7 +303,7 @@ export const NO_KEY_NOTICE =
 
 export function authFailureMessage(): string {
   return process.env.ALLCHEMY_API_KEY
-    ? 'Invalid API key. Set ALLCHEMY_API_KEY with a valid key from https://beta.allchemylabs.ai/?src=notice-invalid (sign in with GitHub to get or rotate one)'
+    ? 'Invalid API key. Replace it (plugin option api_key, or ALLCHEMY_API_KEY) with a valid key from https://beta.allchemylabs.ai/?src=notice-invalid (sign in with GitHub to get or rotate one)'
     : NO_KEY_NOTICE;
 }
 

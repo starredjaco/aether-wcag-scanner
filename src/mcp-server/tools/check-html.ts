@@ -11,6 +11,7 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { analyzeHtml } from '../services/html-analyzer.ts';
 import { getFix } from '../services/fix-service.ts';
+import { actionabilityFields, computeFixKind } from '../services/actionability.ts';
 import { toolError } from './tool-response.ts';
 import { logToolEntry, logError } from '../services/log.ts';
 
@@ -50,7 +51,7 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promis
 export function registerCheckHtml(server: McpServer): void {
   server.tool(
     'aether_check_html',
-    'Analyze an HTML snippet for WCAG accessibility issues without needing a live URL or browser. Uses static heuristic checks and optionally enriches results with RAG-powered fixes. Use this when a developer pastes HTML or asks about a component\'s accessibility.',
+    'Analyze an HTML snippet for WCAG accessibility issues without needing a live URL or browser. Uses static heuristic checks and optionally enriches results with RAG-powered fixes; each issue leads with an `actionabilityNote` to relay verbatim (fixHtml is empty unless fixKind is change). Use this when a developer pastes HTML or asks about a component\'s accessibility.',
     CheckHtmlInput,
     async ({ html, context }) => {
       const scanId = `scan_${randomUUID()}`;
@@ -82,7 +83,7 @@ export function registerCheckHtml(server: McpServer): void {
           description: issue.description,
           impact: issue.impact,
           html: issue.html,
-          fixHtml: null as string | null,
+          ...actionabilityFields('guidance_only', null, undefined, undefined),
           explanation: issue.suggestion,
           wcagCriteria: [] as unknown[],
           techniques: [] as unknown[],
@@ -105,12 +106,20 @@ export function registerCheckHtml(server: McpServer): void {
                 scanId,
               });
               notice ??= fix.rateLimitInfo?.message;
+              const fixKind = computeFixKind({
+                html: issue.html,
+                fixHtml: fix.fixHtml,
+                source: fix.source,
+                fixTier: fix.fixTier,
+                confidenceTier: fix.confidence?.tier,
+              });
               return {
                 ruleId: issue.ruleId,
                 description: issue.description,
                 impact: issue.impact,
                 html: issue.html,
-                fixHtml: fix.fixHtml,
+                // Static analysis: no browser verification, so a change is at best apply_then_confirm.
+                ...actionabilityFields(fixKind, fix.fixHtml, fix.confidence?.tier, undefined),
                 explanation: fix.explanation,
                 wcagCriteria: fix.wcagCriteria,
                 techniques: fix.techniques,
@@ -128,7 +137,7 @@ export function registerCheckHtml(server: McpServer): void {
                 description: issue.description,
                 impact: issue.impact,
                 html: issue.html,
-                fixHtml: null,
+                ...actionabilityFields('guidance_only', null, undefined, undefined),
                 explanation: issue.suggestion,
                 wcagCriteria: [],
                 techniques: [],

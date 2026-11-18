@@ -42,27 +42,57 @@ Installing with `/plugin install` inside Claude Code prompts for your
 **Allchemy Labs API key**; paste the key you got from
 [beta.allchemylabs.ai](https://beta.allchemylabs.ai/?src=readme). Installing from the
 terminal (`claude plugin install …`), or letting Claude run the install for
-you, does not prompt, so set the key afterwards with the command below. Run
-the same command to change the key later:
+you, does not prompt, so set the key afterwards with the command below (or use
+one of the [other places](#where-to-put-the-key)). Run the same command to change
+the key later:
 
 ```
 /plugin configure aether-wcag-scanner@allchemylabs
 ```
 
-The first start installs the plugin's dependencies (about a minute) and the
-first scan downloads Chromium for Playwright. If `/mcp` shows the server as not
-connected right after install, wait a moment and run `/reload-plugins`.
+The first start installs the plugin's dependencies (about a minute) and
+downloads Chromium's headless shell for Playwright in the background (about
+100-125 MB, about 200-300 MB on disk); a scan started before that finishes waits for it. If
+`/mcp` shows the server as not connected right after install, wait a moment and
+run `/reload-plugins`.
+
+### Where to put the key
+
+The cloud fixes need a key; get one at
+[beta.allchemylabs.ai](https://beta.allchemylabs.ai/?src=github) (sign in with GitHub).
+Set it in any one of these places:
+
+1. **The plugin option** — the install prompt, or
+   `/plugin configure aether-wcag-scanner@allchemylabs`.
+2. **Your shell** — `export ALLCHEMY_API_KEY=<key>` before starting `claude`.
+3. **Claude Code settings** — `"env": { "ALLCHEMY_API_KEY": "<key>" }` in
+   `~/.claude/settings.json` (or a project's `.claude/settings.json`).
+4. **A project `.env`** — `ALLCHEMY_API_KEY=<key>` in the `.env` of the project you
+   are scanning.
+
+If more than one is set, the first in this list wins: the plugin option beats
+`ALLCHEMY_API_KEY` from the shell or settings.json, which beats `.env`. If you use
+2, 3 or 4, leave the plugin option empty; an empty option is not an error and
+does not hide the key from the other places.
+
+To check which key the plugin is using, start Claude Code with
+`claude --debug-file /tmp/claude-debug.log` and search the log for the server's
+startup line:
+
+```
+[aether] insights endpoint=https://… apiKey=[REDACTED] source=plugin option
+```
+
+`source` is `plugin option`, `environment (shell or settings.json env)`, the path of
+the `.env` file, or `not set`. The server prints only the first 8 characters of the
+key, and Claude Code's debug log hides even those.
 
 ### Running without a key
 
-The plugin asks for a key at install because the cloud fixes need one. The
-scanner itself runs locally and still works without a key (for example after a
-terminal install, or via `npx`): you get local template fixes for every
-violation. A beta key adds higher quality, contextual fixes
-from the hosted insights engine; get one at
-[beta.allchemylabs.ai](https://beta.allchemylabs.ai/?src=github) (sign in with GitHub).
-Set it via the prompt above, or put `ALLCHEMY_API_KEY=<key>` in the `.env` of
-the project you are scanning.
+The scanner itself runs locally and still works without a key (for example via
+`npx`): you get local template fixes for every violation, and tool results end
+with a notice saying where to get a key. A beta key adds higher quality,
+contextual fixes from the hosted insights engine.
 
 ---
 
@@ -83,8 +113,9 @@ The same server is published to npm and the MCP Registry as
 }
 ```
 
-The first scan downloads Playwright's Chromium once (about 500 MB on disk:
-the browser plus its headless shell). Without `ALLCHEMY_API_KEY`
+The first scan downloads Playwright's Chromium headless shell once (about
+100-125 MB to download, about 200-300 MB on disk; an existing Playwright Chromium install is
+reused). Without `ALLCHEMY_API_KEY`
 the scanner still runs fully offline and returns template fixes.
 
 Claude Code gets the `/wcag-scan` skill, which drives the scan → review → fix → verify
@@ -117,7 +148,9 @@ and edits your files in place.
 The plugin adds two hooks to Claude Code:
 
 - **Session start:** checks that the plugin's dependencies and Chromium are
-  installed, and installs them on the first run.
+  installed (a fraction of a second). If something is missing it installs it
+  in the background, so the session is never held up; progress goes to
+  `aether-deps-install.log` in the plugin's data directory.
 - **After each edit:** when Claude edits an HTML, JSX, TSX, Vue or Svelte file, a
   quick heuristic check (no browser) reports possible accessibility issues to
   Claude. It never blocks an edit, and its findings can be false positives.
@@ -158,7 +191,7 @@ which deadlocks on apps with long-polling or websockets. A config that sets
 ## Requirements
 
 - Node.js >= 20
-- Chromium (installed automatically on first run)
+- Chromium headless shell (installed automatically on first run, about 200-300 MB on disk)
 
 ## Disclaimer
 

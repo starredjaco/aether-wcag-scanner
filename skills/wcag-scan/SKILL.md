@@ -23,9 +23,15 @@ directly from a tool result.
 The only authoritative "did this fix work?" signal is the `verification` block
 returned by `aether_scan_and_fix` / `aether_get_fix`, or a call to
 `aether_verify_fix`. When you report on a fix, cite the measured fields:
-`verified`, `targetCleared`, `regressions`, `newViolations`, `resolvedViolations`, and
-`complianceDelta`. `regressions` lists what a fix took away from the element (for example lost aria-expanded, no longer focusable); a fix with regressions is not `verified` even when `targetCleared` is true, so say so and don't apply it as is.
+`status`, `targetCleared`, `regressions`, `newViolations`, `contextDependent`, `resolvedViolations`, and
+`complianceDelta`. `regressions` lists what a fix took away from the element (for example lost aria-expanded, no longer focusable, hidden content exposed); a fix with regressions is not `verified` even when `targetCleared` is true, so say so and don't apply it as is.
 Any added context must be labeled unverified and based only on provided data.
+
+**Lead each fix with its `actionabilityNote`, verbatim.** `actionability` is the verdict:
+`apply` (specific change, verified), `apply_then_confirm` (specific change; confirm on the
+live page), `review` (generic pattern or failed check: adapt, do not paste; a KB example is in
+`referencePattern`), `no_fix` (nothing to apply; investigate). Never present `review` or
+`no_fix` as a fix; `fixHtml` is empty for them.
 
 **Do not rank or market the tools.** Don't compare them or praise their speed,
 robustness or reliability (e.g. "the SPA scan is the most robust"). Select the
@@ -76,6 +82,12 @@ it depends on whether you have the source:
   only*. Do not use the Edit tool on unrelated files and do not imply anything was
   changed. Make clear the developer must apply it in their own codebase.
 
+Fixes are grouped by root cause: a fix with `occurrences` > 1 covers a repeated
+component (`appliesTo`, `instances` list every element). Present it once with its
+instance count and say that applying it to the shared component fixes all
+instances (relay `appliesTo`: names and alt text need their own wording per
+instance); those instances are not unfixed.
+
 The fixes come from a WCAG corpus and include proper ARIA patterns, not just
 placeholder text.
 
@@ -97,10 +109,13 @@ a fix worked without it.
 `aether_scan_and_fix` and `aether_get_fix` already attach a `verification` block
 per fix — read it instead of re-verifying when the fix is unchanged.
 
-Report the measured delta verbatim: `verified`, `targetCleared`, any `regressions`
-(what the fix took away), any `newViolations`, `resolvedViolations`, and `complianceDelta`. If `verification`
-carries a `note` (e.g. snippet mode can't reproduce color-contrast), relay it
-and prefer a URL re-scan.
+Report the measured delta verbatim: `status`, `targetCleared`, any `regressions`
+(what the fix took away), any `newViolations`, `resolvedViolations`, and `complianceDelta`.
+`status` is `verified`, `not_measurable_in_snippet` (e.g. color-contrast: confirm by
+re-scanning the URL), `failed` or `regressed`. `newViolations` block verification;
+`contextDependent` lists page-context rules (region, landmark-*, …) that mean "confirm on the
+live page", not a failure. If `verification` carries a `note` or `caveat` (e.g. snippet mode
+can't see what your framework renders), relay it and prefer a URL re-scan.
 
 If a tool result ends with a line starting "Notice for the user:" (missing/invalid
 API key, rate limit, partial scan), end your report with that line, unchanged and
@@ -114,10 +129,13 @@ for a violation you have not sent to Aether, call `aether_get_fix` for it.
 ## 5. Report
 
 Summarize using measured facts only:
-- Total violations found, and — per the `verification` verdicts — which fixes
-  are `verified: true` vs which did not clear their target or have `regressions`.
+- Total violations found, then `verificationCounts` and the `verificationSummary`
+  line as given (verified / not measurable on a snippet / failed / regressed).
 - Any `newViolations` a fix introduced, and the net `complianceDelta`.
 - WCAG success criteria addressed (from the tool output).
 - Items the tools flagged for manual review (e.g. a `note` about dynamic-theme
   contrast or meaningful alt text). Do not add your own pass/fail judgments;
   report any evidence-based concern about a fix or finding separately, as yours.
+- Any `repeat` on a fix or remaining violation, stated prominently with its note
+  (`sameFixAgain: true` = do not re-apply that fix unchanged), and the
+  `coverage.note` saying which interactive states the scan did not exercise.

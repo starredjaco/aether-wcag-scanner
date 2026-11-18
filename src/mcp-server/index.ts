@@ -14,10 +14,11 @@
 // exporting every shell session. Must run before anything reads env.
 //
 // Precedence (highest first):
-//   1. variables already exported in the shell / by the MCP host
-//   2. <package root>/.env  — the plugin's own config, two levels up from
+//   1. the plugin option (`api_key`, passed as AETHER_PLUGIN_API_KEY — key only)
+//   2. variables already exported in the shell / settings.json env / by the MCP host
+//   3. <package root>/.env  — the plugin's own config, two levels up from
 //      src/mcp-server (same depth under dist/)
-//   3. <cwd>/.env          — the repository the developer is scanning
+//   4. <cwd>/.env          — the repository the developer is scanning
 // dotenv never overrides an already-set variable, so loading the package-root
 // file first means a scanned repo's .env can fill gaps but can NOT redirect the
 // insights URL or swap the credentials/API key.
@@ -25,16 +26,17 @@ import { config as loadDotenv } from 'dotenv';
 import { CLIENT_VERSION } from '../concepts/a11y-scanner/client-version.ts';
 import { dirname, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { clearUnsetConfigValues } from './env-config.ts';
+import { clearUnsetConfigValues, resolveHostApiKey } from './env-config.ts';
 
 const PACKAGE_ROOT = resolvePath(dirname(fileURLToPath(import.meta.url)), '..', '..');
 // An UNSET plugin userConfig value reaches us as "" or as the literal
 // "${user_config.api_key}" text. dotenv treats any present key as "already set" and
 // would then never read the project's .env, so clear both (see env-config.ts).
-clearUnsetConfigValues(['ALLCHEMY_API_KEY', 'ALLCHEMY_INSIGHT_URL']);
-// Remember where ALLCHEMY_API_KEY came from so the startup line below can say so —
-// the single most common support question is "which key is the plugin using?".
-const apiKeySource: string = process.env.ALLCHEMY_API_KEY ? 'shell environment' : '';
+clearUnsetConfigValues(['ALLCHEMY_INSIGHT_URL']);
+// Plugin option > inherited ALLCHEMY_API_KEY (#32). Remember where the key came from so
+// the startup line below can say so — the single most common support question is
+// "which key is the plugin using?".
+const apiKeySource: string = resolveHostApiKey(process.env);
 const PACKAGE_ENV = resolvePath(PACKAGE_ROOT, '.env');
 const CWD_ENV = resolvePath(process.env.AETHER_PROJECT_CWD || process.cwd(), '.env');
 const beforePackage = process.env.ALLCHEMY_API_KEY;
@@ -69,11 +71,13 @@ export const SERVER_INSTRUCTIONS = [
   '',
   'WHEN TO USE: for any question about the accessibility, a11y or WCAG conformance of a URL, call aether_scan_and_fix FIRST. Do not fetch the page HTML yourself and reason about it; fetched HTML misses rendered state, contrast, keyboard behaviour and SPA routes.',
   '',
-  'WORKFLOW: (1) aether_scan_and_fix with the URL (default maxFixes:10 also generates fixes; use maxFixes:0 only when the user explicitly wants a scan with no fixes). For an HTML snippet use aether_check_html. For a single-page app pass the `spa` block. (2) Present violations grouped by severity: critical, serious, moderate, minor. (3) fixHtml is a SUGGESTION; the tools never modify files. If you can edit the source, apply the fix and then verify; if the URL is a remote site you do not own, present fixHtml as a recommendation and say the developer must apply it. (4) Verify with the `verification` block already attached to each fix, or call aether_verify_fix; report verified, targetCleared, regressions, newViolations, resolvedViolations and complianceDelta verbatim. regressions lists what a fix took away from the element (for example lost aria-expanded, no longer focusable); a fix with regressions is not verified even when targetCleared is true, so say so and do not apply it as is. (5) Never say something is "fixed" unless you changed source AND verification shows verified:true.',
+  'WORKFLOW: (1) aether_scan_and_fix with the URL (default maxFixes:10 also generates fixes; use maxFixes:0 only when the user explicitly wants a scan with no fixes). For an HTML snippet use aether_check_html. For a single-page app pass the `spa` block. (2) Present violations grouped by severity: critical, serious, moderate, minor. (3) fixHtml is a SUGGESTION; the tools never modify files. If you can edit the source, apply the fix and then verify; if the URL is a remote site you do not own, present fixHtml as a recommendation and say the developer must apply it. (4) Verify with the `verification` block already attached to each fix, or call aether_verify_fix; report status, targetCleared, regressions, newViolations, resolvedViolations and complianceDelta verbatim. status is verified | not_measurable_in_snippet (re-scan the URL to confirm) | failed | regressed. newViolations block verification; contextDependent lists page-context rules (region, landmark-*, …) that mean "confirm on the live page", not a failure. regressions lists what a fix took away from the element (for example lost aria-expanded, no longer focusable); a fix with regressions is not verified even when targetCleared is true, so say so and do not apply it as is. (5) Never say something is "fixed" unless you changed source AND verification shows verified:true.',
   '',
-  'REPORT: the fixes are the deliverable, not the counts. Include every severity (critical, serious, moderate, minor). For EACH generated fix show: the target element, the change in one line (e.g. "background #00a2c7 → #00819f" or "add aria-label"), source (rag/template), confidence.tier, and the verification fields (verified, targetCleared, regressions, newViolations, complianceDelta) or the verification note. Group fixes that share one root cause (e.g. one colour token) and say so.',
+  'REPORT: the fixes are the deliverable, not the counts. Include every severity (critical, serious, moderate, minor). For EACH generated fix, lead with its actionabilityNote verbatim, then show: the target element, the change in one line (e.g. "background #00a2c7 → #00819f" or "add aria-label"), source (rag/template), confidence.tier, and the verification fields (status, targetCleared, regressions, newViolations, contextDependent, complianceDelta) or the verification note. Report verificationCounts and the verificationSummary line as given. Group fixes that share one root cause (e.g. one colour token) and say so. A fix with occurrences > 1 covers a repeated component: present it ONCE with its instance count (appliesTo / instances), say that applying it to the shared component fixes all instances (for names and alt text, relay appliesTo: each instance needs its own wording), and do not list those instances as unfixed.',
   '',
-  'HONESTY: relay tool output as-is. Do not invent quality or confidence claims. Each fix carries source (rag = cloud engine, template = local fallback), fixTier, confidence.tier (grounded | best_effort | abstain) and rationale; show them. An abstain means no grounded fix exists; say so rather than inventing one. A `note` on a verification (e.g. contrast cannot be measured on an isolated snippet) must be relayed. Do say when a specific fix or finding looks wrong, with evidence: verification only shows axe stopped flagging the rule, so if a fix removes keyboard focus, an ARIA state (e.g. aria-expanded), an accessible name or content, or a finding is a false positive in the real source, explain why and do not apply it.',
+  'HONESTY: relay tool output as-is. Do not invent quality or confidence claims. Each fix carries source (rag = cloud engine, template = local fallback), fixTier, confidence.tier (grounded | best_effort | abstain) and rationale; show them. An abstain means no grounded fix exists; say so rather than inventing one. actionability is the verdict: apply = specific change, verified; apply_then_confirm = specific change, confirm on the live page; review = generic pattern or failed check, adapt and do not paste (a KB example is in referencePattern); no_fix = nothing to apply, investigate. Never present review or no_fix as a fix. Relay a verification `caveat` (framework/SSR rendering) as given. A `note` on a verification (e.g. contrast cannot be measured on an isolated snippet) must be relayed. Do say when a specific fix or finding looks wrong, with evidence: verification only shows axe stopped flagging the rule, so if a fix removes keyboard focus, an ARIA state (e.g. aria-expanded), an accessible name or content, or a finding is a false positive in the real source, explain why and do not apply it.',
+  '',
+  'REPEATS AND COVERAGE: when a fix or remaining violation carries `repeat`, say so prominently with its note (an earlier fix for that rule/target did not work or was not applied; if sameFixAgain is true do not re-apply it unchanged), and relay `coverage.note` in the report, since it lists interactive states (file inputs, forms, dialogs, collapsed menus) the load-time scan did not test.',
   '',
   'CITATIONS: cite only the WCAG techniques and success criteria the tools returned for that element. If you add one yourself, label it as your own suggestion, not Aether\'s, and never list it alongside Aether\'s grounded citations. Before citing techniques for a violation you have not sent to Aether, call aether_get_fix for it (pass `html`).',
   '',
@@ -134,7 +138,8 @@ try {
     console.error(
       '[aether] ALLCHEMY_INSIGHT_URL points at cloud but ALLCHEMY_API_KEY is unset — ' +
         'RAG fixes will 401 and fall back to templates. ' +
-        'Get a key at https://beta.allchemylabs.ai/?src=stderr and set ALLCHEMY_API_KEY (see README).',
+        'Get a key at https://beta.allchemylabs.ai/?src=stderr and set it with ' +
+        '/plugin configure aether-wcag-scanner@allchemylabs, or as ALLCHEMY_API_KEY (see README).',
     );
   }
 } catch (err) {

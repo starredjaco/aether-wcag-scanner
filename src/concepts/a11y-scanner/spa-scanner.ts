@@ -48,6 +48,7 @@ import { discoverRoutes } from './spa-route-discovery.ts';
 import { captureViolationScreenshots } from './screenshot.ts';
 import { captureNodeLayouts } from './node-layout.ts';
 import { captureNodeContext } from './node-context.ts';
+import { probeCoverage } from './coverage-probe.ts';
 import type { ScanOptions } from './cluster-scanner.ts';
 import { getChromiumLaunchArgs } from './browser-args.ts';
 import { assertScannableUrl, assertSameOriginScannable } from './url-guard.ts';
@@ -60,7 +61,7 @@ import type {
   SPAStabilityMetrics,
   SPAStabilityStrategy,
 } from '../../types/spa-config';
-import type { Violation, ViewportResult } from '../../types/a11y';
+import type { CoverageReport, Violation, ViewportResult } from '../../types/a11y';
 import type { UIAutomationSequenceResult } from '../../types/ui-automation';
 
 const VIEWPORTS = [
@@ -96,9 +97,13 @@ export class SPAScanner {
   // --------------------------------------------------------------------------
 
   async initialize(): Promise<void> {
-    await ensureChromiumInstalled();
+    // Headless only, no `channel`: with just chromium-headless-shell installed
+    // (#25) anything else would fail. `executablePath` is set only when an older
+    // full-browser-only install is what is on disk.
+    const browserOverrides = await ensureChromiumInstalled();
     this.browser = await chromium.launch({
       headless: true,
+      ...browserOverrides,
       // Sandbox stays on unless root / AETHER_NO_SANDBOX=1 (browser-args.ts).
       args: getChromiumLaunchArgs(),
     });
@@ -298,6 +303,7 @@ export class SPAScanner {
     const perViewport: Violation[][] = [];
     const viewportResults: ViewportResult[] = [];
     let uiAutomationResults: UIAutomationSequenceResult | undefined;
+    let coverage: CoverageReport | undefined;
     // Shared across this route's viewports so a violation is screenshotted once,
     // at the first viewport it appears in (aligned with mergeViolations() dedup).
     const captured = new Set<string>();
@@ -339,6 +345,8 @@ export class SPAScanner {
           await captureNodeLayouts(page, violations);
           // Tier 2 (SME Issue 4 table headers + Issue 3 combobox wiring).
           await captureNodeContext(page, violations);
+          // What this route's scan did not exercise (#33) — never throws.
+          coverage = await probeCoverage(page, uiAutomationResults ? 'after-interactions' : 'load');
         }
 
         // Element screenshots (SME Issue 1) — captured at every viewport,
@@ -395,6 +403,7 @@ export class SPAScanner {
       scanDate: new Date().toISOString(),
       success: true,
       ...(uiAutomationResults && { uiAutomationResults }),
+      ...(coverage && { coverage }),
     };
   }
 

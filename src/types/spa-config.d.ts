@@ -1,4 +1,4 @@
-import type { Violation, ViewportResult, InsightsResult } from './a11y';
+import type { Violation, ViewportResult, InsightsResult, CoverageReport } from './a11y';
 import type { UIAutomationStep, UIAutomationSequenceResult } from './ui-automation';
 
 // ============================================================================
@@ -136,6 +136,8 @@ export interface SPARouteResult {
   error?: string;
   insights?: InsightsResult;
   uiAutomationResults?: UIAutomationSequenceResult;
+  /** Interactive states not exercised on this route (desktop probe, #33). */
+  coverage?: CoverageReport;
 }
 
 export interface SPAStabilityMetrics {

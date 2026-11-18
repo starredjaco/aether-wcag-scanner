@@ -40,6 +40,12 @@ export interface ElementSemantics {
   states: Partial<Record<(typeof TRACKED_STATES)[number], string>>;
   /** Control-state attributes present in the DOM, whatever Chromium exposes. */
   stateAttrs: Partial<Record<(typeof DOM_STATE_ATTRS)[number], string>>;
+  /**
+   * How many of the element and its descendants are hidden from assistive
+   * technology by aria-hidden="true" or inert (#30). A drop means the fix
+   * exposed content that was hidden, e.g. a closed menu.
+   */
+  hiddenFromAT?: number;
 }
 
 interface AXValue {
@@ -51,6 +57,11 @@ interface AXNode {
   name?: AXValue;
   properties?: Array<{ name: string; value: AXValue }>;
 }
+
+/** Counts `this` and its descendants hidden by aria-hidden="true" or inert. */
+const HIDDEN_COUNT_FN =
+  `function () { var sel = '[aria-hidden="true" i], [inert]';` +
+  ` return (this.matches(sel) ? 1 : 0) + this.querySelectorAll(sel).length; }`;
 
 /** Tag name of a snippet's first element, e.g. "div" for '<div class="x">…'. */
 export function rootTagOf(html: string): string | undefined {
@@ -89,6 +100,11 @@ export async function captureRootSemantics(page: Page, preferTag?: string): Prom
       returnByValue: true,
     })) as { result: { value?: string } };
     const stateAttrs = JSON.parse(attrsJson.result.value ?? '{}') as ElementSemantics['stateAttrs'];
+    const hiddenCount = (await cdp.send('Runtime.callFunctionOn', {
+      objectId: result.objectId,
+      functionDeclaration: HIDDEN_COUNT_FN,
+      returnByValue: true,
+    })) as { result: { value?: number } };
     const { node } = (await cdp.send('DOM.describeNode', { objectId: result.objectId })) as { node: { backendNodeId: number } };
     const { nodes } = (await cdp.send('Accessibility.getPartialAXTree', {
       backendNodeId: node.backendNodeId,
@@ -109,6 +125,7 @@ export async function captureRootSemantics(page: Page, preferTag?: string): Prom
       focusable: props.get('focusable') === true,
       states,
       stateAttrs,
+      hiddenFromAT: Number(hiddenCount.result.value ?? 0),
     };
   } catch {
     return null;
@@ -141,6 +158,12 @@ export function semanticRegressions(before: ElementSemantics, after: ElementSema
   if (before.name && !after.name) out.push(`lost its accessible name ("${before.name.slice(0, 60)}")`);
   if (INTERACTIVE_ROLES.has(before.role) && !INTERACTIVE_ROLES.has(after.role)) {
     out.push(`role changed from ${before.role} to ${after.role}`);
+  }
+  if ((before.hiddenFromAT ?? 0) > (after.hiddenFromAT ?? 0)) {
+    out.push(
+      'exposes content that was hidden from assistive technology (aria-hidden or inert removed); ' +
+        'confirm it should be announced, e.g. it is not a closed menu or off-screen panel',
+    );
   }
   return out;
 }

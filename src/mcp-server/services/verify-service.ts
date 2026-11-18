@@ -36,6 +36,16 @@ export interface ViolationRef {
   impact?: string;
 }
 
+/**
+ * One verdict per verification (#29). `verified` = target cleared, nothing
+ * blocking added, nothing lost. `not_measurable_in_snippet` = the rule depends
+ * on page CSS/layout/context a snippet can't reproduce (re-scan the URL).
+ * `failed` = measured and the target persists, or a blocking new violation
+ * appeared. `regressed` = the element lost something assistive technology
+ * relied on, or hidden content was exposed.
+ */
+export type VerificationStatus = 'verified' | 'not_measurable_in_snippet' | 'failed' | 'regressed';
+
 export interface VerificationResult {
   /** Always the real browser engine — no static analysis in verification. */
   engine: 'browser-axe';
@@ -51,10 +61,22 @@ export interface VerificationResult {
    * interactive role (#18). Empty = nothing lost; absent = not measured.
    */
   regressions?: string[];
-  /** targetCleared AND no regressions. The one flag that means "this fix worked". */
+  /** The verdict (#29). `verified` below is kept for compatibility: status === 'verified'. */
+  status: VerificationStatus;
+  /** targetCleared AND no regressions AND no blocking new violations. The one flag that means "this fix worked". */
   verified: boolean;
-  /** Regressions the fix introduced (present after, absent before). */
+  /**
+   * Violations the fix introduced (present after, absent before). In snippet
+   * mode these are the BLOCKING ones; page-context rules go to `contextDependent`.
+   */
   newViolations: ViolationRef[];
+  /**
+   * Snippet mode: new violations of page-context rules (region, landmark-*, …)
+   * that a bare snippet can't judge (#30). Not blocking; confirm on the live page.
+   */
+  contextDependent?: ViolationRef[];
+  /** SSR/framework caveat for fixes that hide or expose content (#30). */
+  caveat?: string;
   /** Improvements (present before, absent after). */
   resolvedViolations: ViolationRef[];
   /** Total violation counts before/after and the net reduction (positive = fewer). */
@@ -92,6 +114,56 @@ const SNIPPET_UNRELIABLE_RULES = new Set([
   'target-size',
   'scrollable-region-focusable',
 ]);
+
+/**
+ * Rules that judge the page around the element (landmarks, headings outline,
+ * skip links, document metadata). A snippet has none of that context, so a new
+ * hit from one of these after a fix is reported separately and doesn't block
+ * `verified` (#30). The single source of truth for "page-context rule".
+ */
+export const PAGE_CONTEXT_RULES = new Set([
+  'region',
+  'bypass',
+  'skip-link',
+  'page-has-heading-one',
+  'heading-order',
+  'document-title',
+  'html-has-lang',
+  'html-lang-valid',
+]);
+
+export function isPageContextRule(ruleId: string): boolean {
+  return PAGE_CONTEXT_RULES.has(ruleId) || ruleId.startsWith('landmark-');
+}
+
+/** Rules whose fixes hide or expose content; snippet mode can't see what the framework renders. */
+const HIDE_EXPOSE_RULES = new Set(['aria-hidden-focus', 'aria-hidden-body', 'presentation-role-conflict']);
+
+export const CONTEXT_DEPENDENT_NOTE = 'page-context rule; confirm on the live page';
+
+export const SSR_CAVEAT =
+  "Snippet mode measures the HTML you'd ship, not what your framework renders (e.g. SSR can drop spread " +
+  'attributes). Confirm on the live page.';
+
+export function isSnippetUnreliableRule(ruleId: string): boolean {
+  return SNIPPET_UNRELIABLE_RULES.has(ruleId);
+}
+
+/** Derive the snippet verdict (#29/#30). Order matters: regressions outrank everything. */
+export function snippetStatus(args: {
+  ruleId: string;
+  firedBefore: boolean;
+  targetCleared: boolean;
+  regressions: number;
+  blockingNew: number;
+}): VerificationStatus {
+  if (args.regressions > 0) return 'regressed';
+  if (args.blockingNew > 0) return 'failed';
+  if (SNIPPET_UNRELIABLE_RULES.has(args.ruleId)) return 'not_measurable_in_snippet';
+  // The rule never fired on the bare snippet: it depends on context the snippet lacks.
+  if (!args.firedBefore) return 'not_measurable_in_snippet';
+  return args.targetCleared ? 'verified' : 'failed';
+}
 
 function toRef(s: ViolationSnapshot): ViolationRef {
   return { ruleId: s.ruleId, target: s.target, impact: s.impact };
@@ -134,7 +206,31 @@ export async function verifySnippet(args: VerifySnippetArgs): Promise<Verificati
     const regressions =
       before.semantics && after.semantics ? semanticRegressions(before.semantics, after.semantics) : undefined;
 
+    const allNew = diff.newViolations.map(toRef);
+    const contextDependent = allNew.filter((v) => isPageContextRule(v.ruleId));
+    const blockingNew = allNew.filter((v) => !isPageContextRule(v.ruleId));
+    const status = snippetStatus({
+      ruleId,
+      firedBefore,
+      targetCleared,
+      regressions: regressions?.length ?? 0,
+      blockingNew: blockingNew.length,
+    });
+    const hiddenChanged =
+      (before.semantics?.hiddenFromAT ?? 0) !== (after.semantics?.hiddenFromAT ?? 0);
+    const caveat = HIDE_EXPOSE_RULES.has(ruleId) || hiddenChanged ? SSR_CAVEAT : undefined;
+
     const notes: string[] = [];
+    if (blockingNew.length > 0) {
+      notes.push(
+        `The fix introduces ${blockingNew.map((v) => v.ruleId).join(', ')}. Not counted as verified.`,
+      );
+    }
+    if (contextDependent.length > 0) {
+      notes.push(
+        `New ${[...new Set(contextDependent.map((v) => v.ruleId))].join(', ')}: ${CONTEXT_DEPENDENT_NOTE}.`,
+      );
+    }
     if (regressions && regressions.length > 0) {
       notes.push(
         `axe ${targetCleared ? 'no longer flags' : 'still flags'} "${ruleId}", but the fix makes the element worse for assistive technology: ` +
@@ -158,8 +254,11 @@ export async function verifySnippet(args: VerifySnippetArgs): Promise<Verificati
       targetRule: ruleId,
       targetCleared,
       ...(regressions ? { regressions } : {}),
-      verified: targetCleared && (regressions?.length ?? 0) === 0,
-      newViolations: diff.newViolations.map(toRef),
+      status,
+      verified: status === 'verified',
+      newViolations: blockingNew,
+      ...(contextDependent.length > 0 ? { contextDependent } : {}),
+      ...(caveat ? { caveat } : {}),
       resolvedViolations: diff.fixedViolations.map(toRef),
       complianceDelta: {
         before: beforeSnaps.length,
@@ -200,6 +299,7 @@ export async function verifyUrl(args: VerifyUrlArgs): Promise<VerificationResult
         scope: 'url' as const,
         targetRule: ruleId,
         targetCleared,
+        status: targetCleared ? ('verified' as const) : ('failed' as const),
         verified: targetCleared,
         newViolations: diff.newViolations.map(toRef),
         resolvedViolations: diff.fixedViolations.map(toRef),
@@ -219,6 +319,7 @@ export async function verifyUrl(args: VerifyUrlArgs): Promise<VerificationResult
       scope: 'url' as const,
       targetRule: ruleId,
       targetCleared,
+      status: targetCleared ? ('verified' as const) : ('failed' as const),
       verified: targetCleared,
       newViolations: [],
       resolvedViolations: [],

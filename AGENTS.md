@@ -27,13 +27,20 @@ which the browser scan measures.
      must apply it. Do not imply anything changed.
 4. **Verify.** Read the `verification` block attached to each fix, or call `aether_verify_fix`
    (URL mode re-scans a live page; snippet mode diffs original vs fixed HTML). Report
-   `verified`, `targetCleared`, `regressions`, `newViolations`, `resolvedViolations` and
-   `complianceDelta` verbatim. `regressions` lists what a fix took away from the element (for example lost aria-expanded, no longer focusable); a fix with regressions is not `verified` even when `targetCleared` is true, so say so and don't apply it as is.
-5. **Report.** The fixes are the deliverable, not the counts. Include every severity. For each
-   generated fix show the target element, the change in one line (for example "background
+   `status`, `targetCleared`, `regressions`, `newViolations`, `resolvedViolations` and
+   `complianceDelta` verbatim. `regressions` lists what a fix took away from the element (for example lost aria-expanded, no longer focusable, hidden content exposed); a fix with regressions is not `verified` even when `targetCleared` is true, so say so and don't apply it as is.
+   `status` is `verified`, `not_measurable_in_snippet` (re-scan the URL to confirm), `failed` or
+   `regressed`. `newViolations` block verification; `contextDependent` lists page-context rules
+   (region, landmark-*, …) that mean "confirm on the live page", not a failure.
+5. **Report.** The fixes are the deliverable, not the counts. Include every severity. Lead each
+   fix with its `actionabilityNote`, verbatim, then show the target element, the change in one line (for example "background
    #00a2c7 → #00819f" or "add aria-label"), `source`, `confidence.tier`, and the verification
    fields or note. Group fixes that share one root cause (one colour token, one landmark) and say
-   so. Then: WCAG criteria addressed and anything flagged for manual review.
+   so. A fix with `occurrences` > 1 covers a repeated component: present it once with its instance
+   count (`appliesTo`, `instances`) and say that applying it to the shared component fixes all
+   instances (relay `appliesTo`: names and alt text need their own wording per instance). Then:
+   `verificationCounts` and the `verificationSummary` line as given, WCAG criteria addressed and
+   anything flagged for manual review.
 
 ## Honesty rules
 
@@ -47,8 +54,15 @@ which the browser scan measures.
 - Show each fix's `source` (`rag` = cloud engine, `template` = local fallback), `fixTier`,
   `confidence.tier` (`grounded` | `best_effort` | `abstain`) and `rationale`. An `abstain`
   means no grounded fix exists; say so instead of inventing one.
-- Relay any `note` on a verification (for example, contrast cannot be measured on an isolated
-  snippet; prefer a URL re-scan).
+- Relay any `repeat` on a fix or remaining violation prominently with its note (an earlier fix for
+  that rule/target did not work or was not applied; with `sameFixAgain: true` don't re-apply it
+  unchanged), and relay `coverage.note` in the report (interactive states the scan did not test).
+- `actionability` is the verdict: `apply` (specific change, verified), `apply_then_confirm`
+  (specific change; confirm on the live page), `review` (generic pattern or failed check: adapt,
+  do not paste; a KB example is in `referencePattern`), `no_fix` (nothing to apply; investigate).
+  Never present `review` or `no_fix` as a fix; `fixHtml` is empty for them.
+- Relay any `note` or `caveat` on a verification (for example, contrast cannot be measured on an
+  isolated snippet; snippet mode can't see what your framework renders; prefer a URL re-scan).
 - Cite only the WCAG techniques and success criteria the tools returned for that element. If you
   add one yourself, label it as your own suggestion, not Aether's, and never list it alongside
   Aether's grounded citations. Before citing techniques for a violation you have not sent to
@@ -58,8 +72,11 @@ which the browser scan measures.
 
 ## Setup reminder
 
-`ALLCHEMY_API_KEY` (from https://beta.allchemylabs.ai/?src=readme) enables cloud fixes
-(`source: "rag"`). Without it the scanner still runs and returns template fixes. If a tool result
+An API key (from https://beta.allchemylabs.ai/?src=readme) enables cloud fixes
+(`source: "rag"`). Set it as `ALLCHEMY_API_KEY` in the MCP server's env, the shell, or the
+project `.env`; in Claude Code the plugin's `api_key` option (`/plugin configure`) takes
+precedence over those. The server's stderr startup line (`[aether] … source=…`) says which
+one is in use. Without a key the scanner still runs and returns template fixes. If a tool result
 ends with a line starting "Notice for the user:" (missing/invalid key, rate limit, partial scan),
 end your answer to the user with that line, unchanged and including its link, once per session.
-The first scan downloads Chromium once.
+The first scan downloads Chromium's headless shell once (about 200-300 MB on disk).

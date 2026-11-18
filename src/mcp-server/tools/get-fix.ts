@@ -20,6 +20,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { getFix, explainViolation } from '../services/fix-service.ts';
 import { verifySnippet } from '../services/verify-service.ts';
 import type { VerificationResult } from '../services/verify-service.ts';
+import { actionabilityFields, computeFixKind } from '../services/actionability.ts';
 import { toolError, jsonResult } from './tool-response.ts';
 import { logToolEntry, logError } from '../services/log.ts';
 
@@ -48,7 +49,7 @@ const GetFixInput = {
 export function registerGetFix(server: McpServer): void {
   server.tool(
     'aether_get_fix',
-    'Get a RAG-powered fix OR explanation for a WCAG violation. Pass `html` (the failing element) to get a concrete fixHtml plus a measured verification. Omit `html` to get a rule-level explanation (WCAG success criteria, technique code examples, failure patterns, and fix guidance). Requires ALLCHEMY_API_KEY for RAG output; falls back to templates without it.',
+    'Get a RAG-powered fix OR explanation for a WCAG violation. Pass `html` (the failing element) to get a fix plus a measured verification; lead with its `actionabilityNote` verbatim and never present review or no_fix as a fix (fixHtml is empty unless fixKind is change; a KB example comes back as referencePattern). Omit `html` to get a rule-level explanation (WCAG success criteria, technique code examples, failure patterns, and fix guidance). Requires ALLCHEMY_API_KEY for RAG output; falls back to templates without it.',
     GetFixInput,
     async ({ ruleId, html, parentHtml, childrenHtml, siblingHtml, failureSummary, url, verify }) => {
       const scanId = `scan_${randomUUID()}`;
@@ -74,8 +75,16 @@ export function registerGetFix(server: McpServer): void {
 
         // Deterministically verify the fix on the real browser engine (diff
         // original vs fixed HTML). Attach the measured verdict; never invent one.
+        // No-op / KB fixes are not changes (#28); there is nothing to verify.
+        const fixKind = computeFixKind({
+          html,
+          fixHtml: result.fixHtml,
+          source: result.source,
+          fixTier: result.fixTier,
+          confidenceTier: result.confidence?.tier,
+        });
         let verification: VerificationResult | undefined;
-        if (verify) {
+        if (verify && fixKind === 'change') {
           try {
             verification = await verifySnippet({
               ruleId,
@@ -89,7 +98,16 @@ export function registerGetFix(server: McpServer): void {
           }
         }
 
-        return jsonResult({ ...result, ...(verification ? { verification } : {}) }, result.rateLimitInfo?.message);
+        const { actionability, actionabilityNote, ...rest } = actionabilityFields(
+          fixKind,
+          result.fixHtml,
+          result.confidence?.tier,
+          verification,
+        );
+        return jsonResult(
+          { actionability, actionabilityNote, ...result, ...rest, ...(verification ? { verification } : {}) },
+          result.rateLimitInfo?.message,
+        );
       } catch (err) {
         return toolError(err, { ruleId });
       }

@@ -262,6 +262,27 @@ export interface InsightsResult {
   versions?: ArtifactVersions;
 }
 
+/** Interactive states a load-time scan did not enter (#33). */
+export type CoverageKind =
+  | 'file-input'
+  | 'form'
+  | 'closed-dialog'
+  | 'collapsed-menu'
+  | 'closed-details'
+  | 'hidden-tab-panels';
+
+/** Which DOM state axe saw: the page as loaded, or after configured interactions ran. */
+export type CoverageStateTested = 'load' | 'after-interactions';
+
+/** What the scan did not exercise, from a cheap DOM probe (coverage-probe.ts). */
+export interface CoverageReport {
+  stateTested: CoverageStateTested;
+  /** Kinds with count > 0 only; examples are up to 3 CSS selectors. */
+  notExercised: Array<{ kind: CoverageKind; count: number; examples: string[] }>;
+  /** One line for the report, e.g. "1 file input and 2 collapsed menus were not exercised; …". */
+  note: string;
+}
+
 export interface PageScanResult {
   url: string;
   violations: Violation[];
@@ -277,6 +298,8 @@ export interface PageScanResult {
   insightsError?: string;
   viewportResults?: ViewportResult[];
   uiAutomationResults?: import('./ui-automation').UIAutomationSequenceResult;
+  /** Interactive states not exercised (desktop probe); absent if the probe failed (#33). */
+  coverage?: CoverageReport;
   // SPA-scan annotations (populated by SPAScanner only)
   route?: string;
   stateKey?: string;

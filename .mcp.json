@@ -6,7 +6,7 @@
         "${CLAUDE_PLUGIN_ROOT}/scripts/start.js"
       ],
       "env": {
-        "ALLCHEMY_API_KEY": "${user_config.api_key}"
+        "AETHER_PLUGIN_API_KEY": "${user_config.api_key}"
       },
       "timeout": 600000
     }

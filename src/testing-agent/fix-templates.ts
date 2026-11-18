@@ -928,7 +928,8 @@ export const FIX_TEMPLATES: Record<string, FixTemplate> = {
   'aria-hidden-focus': {
     errorSummary: 'Element with aria-hidden="true" contains focusable content',
     generateFix: (html) => ({
-      fixHtml: html.replace(/\s*aria-hidden\s*=\s*"true"/, ''),
+      // Any spelling of the value: "true", 'true', JSX {true} / {"true"}, or unquoted (#28).
+      fixHtml: html.replace(/\s*aria-hidden\s*=\s*(?:"\s*true\s*"|'\s*true\s*'|\{\s*(?:true|"true"|'true')\s*\}|true\b)/i, ''),
       explanation: 'Remove aria-hidden="true" since this element contains focusable children. Alternatively, add tabindex="-1" to each focusable child if the container must be hidden from assistive technology.',
     }),
   },
@@ -967,9 +968,10 @@ export const FIX_TEMPLATES: Record<string, FixTemplate> = {
       // state/property or is focusable, which forces it back into the
       // accessibility tree — a conflict browsers resolve by ignoring the
       // presentational role. Clear it deterministically.
-      if (/role\s*=\s*"(presentation|none)"/i.test(html)) {
+      // Single- and double-quoted values alike (#28: a missed quote style returned html unchanged).
+      if (/role\s*=\s*["'](presentation|none)["']/i.test(html)) {
         return {
-          fixHtml: html.replace(/\s*role\s*=\s*"(presentation|none)"/i, ''),
+          fixHtml: html.replace(/\s*role\s*=\s*["'](presentation|none)["']/i, ''),
           explanation:
             'This element has role="presentation"/"none" but also carries a global ARIA ' +
             'attribute or is focusable, so browsers ignore the presentational role. Remove ' +
@@ -978,9 +980,9 @@ export const FIX_TEMPLATES: Record<string, FixTemplate> = {
             'attributes (e.g. aria-label, aria-hidden="false") and any tabindex.',
         };
       }
-      if (/aria-hidden\s*=\s*"false"/i.test(html)) {
+      if (/aria-hidden\s*=\s*(?:["']false["']|\{\s*false\s*\})/i.test(html)) {
         return {
-          fixHtml: html.replace(/\s*aria-hidden\s*=\s*"false"/i, ''),
+          fixHtml: html.replace(/\s*aria-hidden\s*=\s*(?:["']false["']|\{\s*false\s*\})/i, ''),
           explanation:
             'The element has an implicit presentation role (e.g. an <img> with empty alt) but ' +
             'aria-hidden="false" forces it back into the accessibility tree, creating the conflict. ' +

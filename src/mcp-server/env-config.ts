@@ -1,7 +1,8 @@
 /**
  * Clean up config values the MCP host handed us without filling them in.
  *
- * The plugin's .mcp.json passes ALLCHEMY_API_KEY="${user_config.api_key}". When the
+ * The plugin's .mcp.json passes AETHER_PLUGIN_API_KEY="${user_config.api_key}" (up to
+ * 1.0.8 it was ALLCHEMY_API_KEY, and an older install may still pass that). When the
  * user never set the key (a terminal `claude plugin install` does not prompt for it),
  * Claude Code passes the value on in one of two ways:
  *   - as an empty string, or
@@ -26,4 +27,42 @@ export function clearUnsetConfigValues(names: string[], env: NodeJS.ProcessEnv =
   for (const name of names) {
     if (isUnsetConfigValue(env[name])) delete env[name];
   }
+}
+
+/**
+ * The variable the plugin's .mcp.json fills from the `api_key` plugin option (#32).
+ *
+ * The option used to be mapped straight onto ALLCHEMY_API_KEY. That had two problems:
+ *   - with the option unset, Claude Code flagged the server config as invalid
+ *     ("Missing environment variables: user_config.api_key"; newer versions drop the
+ *     server entirely), even when the key was set in the shell or settings.json `env`;
+ *   - with `"default": ""` on the option (which removes that error), the empty value
+ *     REPLACED an ALLCHEMY_API_KEY inherited from the shell or settings.json `env`.
+ * Mapping to a separate name leaves the inherited ALLCHEMY_API_KEY alone; this module
+ * then picks the winner.
+ */
+export const PLUGIN_API_KEY_VAR = 'AETHER_PLUGIN_API_KEY';
+
+export const API_KEY_SOURCE_PLUGIN = 'plugin option';
+export const API_KEY_SOURCE_ENV = 'environment (shell or settings.json env)';
+
+/**
+ * Resolve the API key from what the MCP host passed in, before any .env file is read.
+ *
+ * Precedence: plugin option (AETHER_PLUGIN_API_KEY) > inherited ALLCHEMY_API_KEY.
+ * Empty values and unfilled ${...} placeholders count as unset. On return,
+ * env.ALLCHEMY_API_KEY holds the winning key (or is absent, so dotenv can fill it from
+ * a .env file) and AETHER_PLUGIN_API_KEY is removed so nothing else reads it.
+ *
+ * Returns the source label for the startup line, or '' when neither is set.
+ */
+export function resolveHostApiKey(env: NodeJS.ProcessEnv = process.env): string {
+  clearUnsetConfigValues(['ALLCHEMY_API_KEY', PLUGIN_API_KEY_VAR], env);
+  const fromPlugin = env[PLUGIN_API_KEY_VAR]?.trim();
+  delete env[PLUGIN_API_KEY_VAR];
+  if (fromPlugin) {
+    env.ALLCHEMY_API_KEY = fromPlugin;
+    return API_KEY_SOURCE_PLUGIN;
+  }
+  return env.ALLCHEMY_API_KEY ? API_KEY_SOURCE_ENV : '';
 }

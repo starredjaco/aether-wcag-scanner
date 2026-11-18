@@ -1,7 +1,7 @@
 {
   "name": "aether-wcag-scanner",
   "displayName": "Aether WCAG Scanner",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "WCAG 2.1 AA accessibility scanner with RAG-powered fix generation. Scans live URLs via Playwright + axe-core across desktop, tablet, and mobile viewports and returns violations paired with corpus-backed fixes and WCAG technique references.",
   "author": {
     "name": "Allchemy Labs",
@@ -23,8 +23,9 @@
     "api_key": {
       "type": "string",
       "title": "Allchemy Labs API key",
-      "description": "Your Allchemy Labs beta key from https://beta.allchemylabs.ai/?src=install (sign in with GitHub). Enables corpus-grounded fixes from the hosted insights engine; the scanner itself runs locally. Change it later with /plugin configure aether-wcag-scanner@allchemylabs.",
+      "description": "Your Allchemy Labs beta key from https://beta.allchemylabs.ai/?src=install (sign in with GitHub). Enables corpus-grounded fixes from the hosted insights engine; the scanner itself runs locally. Takes precedence over an ALLCHEMY_API_KEY set in your environment, settings.json env or a project .env; leave it empty to use one of those. Change it later with /plugin configure aether-wcag-scanner@allchemylabs.",
       "required": true,
+      "default": "",
       "sensitive": true
     },
     "post_edit_hook": {
